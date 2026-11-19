@@ -29,10 +29,10 @@ jobs:
             libwayland-dev libxkbcommon-dev
 
           echo "glibc: $(ldd --version | head -1)"
-          echo "gcc: $(gcc --version | head -1)"
-          echo "sdl2: $(pkg-config --modversion sdl2)"
-          echo "gtk3: $(pkg-config --modversion gtk+-3.0)"
-          echo "ffmpeg: $(pkg-config --modversion libavformat)"
+          echo "gcc:   $(gcc --version | head -1)"
+          echo "nasm:  $(nasm -v)"
+          echo "sdl2:  $(pkg-config --modversion sdl2)"
+          echo "gtk3:  $(pkg-config --modversion gtk+-3.0)"
           echo '#include <stdlib.h>' > /tmp/t.c
           echo 'int main(){return 0;}' >> /tmp/t.c
           gcc /tmp/t.c -o /tmp/t && echo "C_COMPILE_OK" || echo "C_COMPILE_FAILED"
@@ -50,26 +50,42 @@ jobs:
           cd /tmp/ikemen
           git log -1 --oneline
 
-      - name: 编译 ARM64 二进制
+      - name: 编译 ARM64 二进制（隔离环境，避免 runner 污染 CFLAGS）
         run: |
-          cd /tmp/ikemen
-          export PATH=/usr/local/go/bin:$PATH
+          echo "=== 宿主注入的可疑环境变量（仅供诊断）==="
+          env | grep -iE '^(CFLAGS|CXXFLAGS|CPPFLAGS|LDFLAGS|CGO_|CPATH|C_INCLUDE|CC=|CXX=)' || echo "(none)"
 
-          unset CFLAGS CXXFLAGS CPPFLAGS CGO_CFLAGS CGO_CXXFLAGS CGO_LDFLAGS CPATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH LIBRARY_PATH CC CXX
-          export CC=gcc
-          export CXX=g++
-
-          rm -f build/glibc_compat.h
-
-          echo "=== CGO env after cleanup ==="
-          env | grep -iE '^(CFLAGS|CXXFLAGS|CPPFLAGS|CGO_|CPATH|CC=|CXX=)' || echo "(clean)"
-
-          echo "=== FFmpeg self-build 7.1: reisen needs libavcodec/bsf.h ==="
-          export FFMPEG_REV=release/7.1
-          export BUILD_FFMPEG=yes
-          export BUILD_SDL2=no
-
-          ./build/build.sh LinuxARM
+          # 关键：用 env -i 从零构造干净环境，彻底摆脱 GitHub runner 注入的
+          # x86/clang 专用编译标志（-mno-red-zone / -Werror=unknown-warning-option）
+          # 这些标志会污染 libvpx 的 configure，导致 VP8/VP9 decoder 被禁用。
+          env -i \
+            HOME=/root \
+            PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            TMPDIR=/tmp \
+            TERM=xterm \
+            GOOS=linux GOARCH=arm64 CGO_ENABLED=1 \
+            GOPATH=/root/go GOCACHE=/root/.cache/go-build \
+            BUILD_FFMPEG=yes BUILD_SDL2=no \
+            FFMPEG_REV=release/7.1 LIBVPX_REV=v1.15.2 \
+            bash -c '
+              set -o pipefail
+              cd /tmp/ikemen || exit 1
+              echo "=== 干净环境确认 ==="
+              env | grep -iE "^(CFLAGS|CXXFLAGS|CPPFLAGS|LDFLAGS|CGO_|CPATH|CC=|CXX=)" || echo "(clean - no injected flags)"
+              echo "=== 开始编译 ==="
+              ./build/build.sh LinuxARM
+              rc=$?
+              if [ $rc -ne 0 ]; then
+                echo "========== 编译失败，诊断信息 =========="
+                echo "--- libvpx config.log 末尾 ---"
+                find /tmp/ikemen/build -path "*libvpx*/config.log" -exec tail -40 {} \; 2>/dev/null || echo "(no libvpx config.log)"
+                echo "--- FFmpeg libvpx 相关诊断 ---"
+                find /tmp/ikemen/build -path "*/ffbuild/config.log" -exec grep -iE "libvpx|vpx_codec|ERROR" {} \; 2>/dev/null | tail -30 || echo "(no ffmpeg config.log)"
+                echo "--- vpx.pc 是否生成 ---"
+                find /tmp/ikemen/build -name "vpx.pc" 2>/dev/null || echo "(no vpx.pc -> libvpx 未成功安装)"
+              fi
+              exit $rc
+            '
 
           file Ikemen_GO_LinuxARM 2>/dev/null || file bin/Ikemen_GO_LinuxARM
 
@@ -80,6 +96,7 @@ jobs:
           cp Ikemen_GO_LinuxARM /tmp/out/ 2>/dev/null || cp bin/Ikemen_GO_LinuxARM /tmp/out/
           cp -a lib/. /tmp/out/lib/ 2>/dev/null || true
           echo "=== 二进制动态依赖 ==="
+          file /tmp/out/Ikemen_GO_LinuxARM || true
           ldd /tmp/out/Ikemen_GO_LinuxARM || true
           cd /tmp/out
           zip -r /tmp/ikemen-arm64-r36s.zip .
