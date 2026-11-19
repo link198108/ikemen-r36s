@@ -56,13 +56,17 @@ jobs:
           export PATH=/usr/local/go/bin:$PATH
 
           unset CFLAGS CXXFLAGS CPPFLAGS CGO_CFLAGS CGO_CXXFLAGS CGO_LDFLAGS CPATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH LIBRARY_PATH CC CXX
+          export CC=gcc
+          export CXX=g++
 
           rm -f build/glibc_compat.h
 
           echo "=== CGO env after cleanup ==="
           env | grep -iE '^(CFLAGS|CXXFLAGS|CPPFLAGS|CGO_|CPATH|CC=|CXX=)' || echo "(clean)"
 
-          export BUILD_FFMPEG=no
+          echo "=== FFmpeg self-build 7.1: reisen needs libavcodec/bsf.h ==="
+          export FFMPEG_REV=release/7.1
+          export BUILD_FFMPEG=yes
           export BUILD_SDL2=no
 
           ./build/build.sh LinuxARM
