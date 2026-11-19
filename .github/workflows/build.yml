@@ -18,7 +18,7 @@ jobs:
           apt-get install -y \
             ca-certificates curl wget git pkg-config make ninja-build \
             nasm yasm build-essential zip unzip xz-utils file \
-            libxmp-dev \
+            libxmp-dev libsdl2-dev \
             libavformat-dev libavcodec-dev libavutil-dev \
             libswresample-dev libswscale-dev libavfilter-dev \
             libdrm-dev libgbm-dev libegl1-mesa-dev libgles2-mesa-dev \
@@ -26,13 +26,10 @@ jobs:
             libx11-dev libxext-dev libxi-dev libxrandr-dev libxcursor-dev \
             libwayland-dev libxkbcommon-dev
 
-          cd /tmp
-          wget -q https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-linux-aarch64.tar.gz
-          tar xzf cmake-3.31.6-linux-aarch64.tar.gz
-          cp -a cmake-3.31.6-linux-aarch64/bin/* /usr/local/bin/
-          cmake --version
           echo "glibc: $(ldd --version | head -1)"
           echo "gcc: $(gcc --version | head -1)"
+          echo "sdl2: $(pkg-config --modversion sdl2)"
+          echo "ffmpeg: $(pkg-config --modversion libavformat)"
           echo '#include <stdlib.h>' > /tmp/t.c
           echo 'int main(){return 0;}' >> /tmp/t.c
           gcc /tmp/t.c -o /tmp/t && echo "C_COMPILE_OK" || echo "C_COMPILE_FAILED"
@@ -63,7 +60,7 @@ jobs:
           env | grep -iE '^(CFLAGS|CXXFLAGS|CPPFLAGS|CGO_|CPATH|CC=|CXX=)' || echo "(clean)"
 
           export BUILD_FFMPEG=no
-          export BUILD_SDL2=yes
+          export BUILD_SDL2=no
 
           ./build/build.sh LinuxARM
 
