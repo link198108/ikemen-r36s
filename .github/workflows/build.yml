@@ -50,58 +50,84 @@ jobs:
           cd /tmp/ikemen
           git log -1 --oneline
 
-      - name: 编译 ARM64 二进制（隔离环境，避免 runner 污染 CFLAGS）
+      - name: 编译 ARM64 二进制（清理污染 + 全程日志）
         run: |
-          echo "=== 宿主注入的可疑环境变量（仅供诊断）==="
+          cd /tmp/ikemen
+          export PATH=/usr/local/go/bin:$PATH
+
+          echo "=== 编译前环境（诊断 runner 注入的污染）==="
           env | grep -iE '^(CFLAGS|CXXFLAGS|CPPFLAGS|LDFLAGS|CGO_|CPATH|C_INCLUDE|CC=|CXX=)' || echo "(none)"
 
-          # 关键：用 env -i 从零构造干净环境，彻底摆脱 GitHub runner 注入的
-          # x86/clang 专用编译标志（-mno-red-zone / -Werror=unknown-warning-option）
-          # 这些标志会污染 libvpx 的 configure，导致 VP8/VP9 decoder 被禁用。
-          env -i \
-            HOME=/root \
-            PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-            TMPDIR=/tmp \
-            TERM=xterm \
-            GOOS=linux GOARCH=arm64 CGO_ENABLED=1 \
-            GOPATH=/root/go GOCACHE=/root/.cache/go-build \
-            BUILD_FFMPEG=yes BUILD_SDL2=no \
-            FFMPEG_REV=release/7.1 LIBVPX_REV=v1.15.2 \
-            bash -c '
-              set -o pipefail
-              cd /tmp/ikemen || exit 1
-              echo "=== 干净环境确认 ==="
-              env | grep -iE "^(CFLAGS|CXXFLAGS|CPPFLAGS|LDFLAGS|CGO_|CPATH|CC=|CXX=)" || echo "(clean - no injected flags)"
-              echo "=== 开始编译 ==="
-              ./build/build.sh LinuxARM
-              rc=$?
-              if [ $rc -ne 0 ]; then
-                echo "========== 编译失败，诊断信息 =========="
-                echo "--- libvpx config.log 末尾 ---"
-                find /tmp/ikemen/build -path "*libvpx*/config.log" -exec tail -40 {} \; 2>/dev/null || echo "(no libvpx config.log)"
-                echo "--- FFmpeg libvpx 相关诊断 ---"
-                find /tmp/ikemen/build -path "*/ffbuild/config.log" -exec grep -iE "libvpx|vpx_codec|ERROR" {} \; 2>/dev/null | tail -30 || echo "(no ffmpeg config.log)"
-                echo "--- vpx.pc 是否生成 ---"
-                find /tmp/ikemen/build -name "vpx.pc" 2>/dev/null || echo "(no vpx.pc -> libvpx 未成功安装)"
-              fi
-              exit $rc
-            '
+          # 精准清除被注入的污染变量（x86/clang 专用标志会毁掉 arm64 的 libvpx configure）
+          unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS CPATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH LIBRARY_PATH
+          unset CGO_CFLAGS CGO_CXXFLAGS CGO_CPPFLAGS CGO_LDFLAGS
+          unset CC CXX
+          # 显式指定原生 gcc，确保 libvpx/FFmpeg configure 不继承错误编译器
+          export CC=gcc
+          export CXX=g++
 
-          file Ikemen_GO_LinuxARM 2>/dev/null || file bin/Ikemen_GO_LinuxARM
+          export BUILD_FFMPEG=yes
+          export BUILD_SDL2=no
+          export FFMPEG_REV=release/7.1
+          export LIBVPX_REV=v1.15.2
+
+          echo "=== 清理后环境 ==="
+          env | grep -iE '^(CFLAGS|CXXFLAGS|CPPFLAGS|LDFLAGS|CGO_|CPATH|CC=|CXX=)' || echo "(clean)"
+
+          set +e
+          ./build/build.sh LinuxARM 2>&1 | tee /tmp/ikemen-build.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "BUILD_RC=$rc"
+
+          # 把关键结果写进网页直接可见的 Summary，方便一眼定位
+          {
+            echo "## 编译结果：退出码 $rc"
+            echo ""
+            echo "### 日志最后 50 行"
+            echo '```'
+            tail -50 /tmp/ikemen-build.log
+            echo '```'
+            if [ "$rc" -ne 0 ]; then
+              echo "### libvpx config.log 末尾"
+              echo '```'
+              find /tmp/ikemen/build -path '*libvpx*/config.log' -exec tail -30 {} \; 2>/dev/null || echo "(无 libvpx config.log)"
+              echo '```'
+              echo "### FFmpeg 关于 libvpx 的诊断"
+              echo '```'
+              find /tmp/ikemen/build -path '*/ffbuild/config.log' -exec grep -iE 'libvpx|vpx_codec|ERROR' {} \; 2>/dev/null | tail -25 || echo "(无 ffmpeg config.log)"
+              echo '```'
+              echo "### vpx.pc 是否生成"
+              find /tmp/ikemen/build -name vpx.pc 2>/dev/null || echo "未找到 vpx.pc（libvpx 未成功安装）"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          exit $rc
+
+      - name: 上传编译日志（无论成败）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ikemen-build-log
+          path: /tmp/ikemen-build.log
+          if-no-files-found: warn
 
       - name: 打包二进制和依赖库
+        if: success()
         run: |
           cd /tmp/ikemen
           mkdir -p /tmp/out/lib
           cp Ikemen_GO_LinuxARM /tmp/out/ 2>/dev/null || cp bin/Ikemen_GO_LinuxARM /tmp/out/
           cp -a lib/. /tmp/out/lib/ 2>/dev/null || true
-          echo "=== 二进制动态依赖 ==="
+          echo "=== 二进制文件类型 ==="
           file /tmp/out/Ikemen_GO_LinuxARM || true
+          echo "=== 二进制动态依赖 ==="
           ldd /tmp/out/Ikemen_GO_LinuxARM || true
           cd /tmp/out
           zip -r /tmp/ikemen-arm64-r36s.zip .
 
       - name: 上传成品
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: ikemen-arm64-r36s
