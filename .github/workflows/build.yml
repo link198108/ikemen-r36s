@@ -170,7 +170,23 @@ jobs:
                  '\treturn unsafe.Pointer(C.eglGetProcAddress(cname))\n'
                  '}\n')
           open(src + 'util_gles_linux.go', 'w', encoding='utf-8', newline='\n').write(egl)
-          print('PATCH_OK: GLES32 renderer enabled for Linux')
+
+          # 3d) 排除 GL33 渲染器：让 Linux 只编译 GLES32，两套渲染器保持互斥。
+          # 官方 render_gl33.go / font_gl33.go 的 tag 是 !android && !ios，
+          # 与已放开到 Linux 的 GLES32 同时编译，导致 boundTexture 等包级符号
+          # 重复声明，并连锁引发 Texture_GL33/GLES32 类型不匹配的编译错误。
+          patch_file('render_gl33.go', '//go:build !android && !ios', '//go:build !linux && !android && !ios')
+          patch_file('font_gl33.go', '//go:build !android && !ios', '//go:build !linux && !android && !ios')
+
+          # 3e) util_desktop.go 的 OpenGL 3.3 分支也指向 GLES32（GL33 已被排除）
+          patch_file('util_desktop.go',
+                     '\tcase "OpenGL 3.3":\n'
+                     '\t\tgfx = &Renderer_GL33{}\n'
+                     '\t\tgfxFont = &FontRenderer_GL33{}',
+                     '\tcase "OpenGL 3.3":\n'
+                     '\t\tgfx = &Renderer_GLES32{}\n'
+                     '\t\tgfxFont = &FontRenderer_GLES32{}')
+          print('PATCH_OK: GLES32 renderer enabled for Linux, GL33 excluded')
 
           # ===== 补丁 4：config.ini 用 GLES3.2（引擎初始化会写回，这里先设对） =====
           cfg = '/tmp/ikemen/save/config.ini'
@@ -188,6 +204,8 @@ jobs:
           grep -n -- '--pkg-config-flags=--static' /tmp/ikemen/build/build.sh || echo "FFMPEG_STATIC_MISSING"
           grep -n -- 'SDL_KMSDRM=ON' /tmp/ikemen/build/build.sh || echo "KMSDRM_MISSING"
           grep -n -- 'linux || android' /tmp/ikemen/src/render_gles32.go || echo "GLES_TAG_MISSING"
+          grep -n -- '!linux && !android && !ios' /tmp/ikemen/src/render_gl33.go || echo "GL33_EXCLUDE_MISSING"
+          grep -n -- '!linux && !android && !ios' /tmp/ikemen/src/font_gl33.go || echo "FGL33_EXCLUDE_MISSING"
           grep -n -- 'OpenGL ES 3.2' /tmp/ikemen/src/util_desktop.go || echo "SELECTOR_MISSING"
           ls -l /tmp/ikemen/src/util_gles_linux.go || echo "EGL_FILE_MISSING"
 
