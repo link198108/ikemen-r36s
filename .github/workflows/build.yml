@@ -1,0 +1,74 @@
+name: Build Ikemen GO ARM64 for R36S
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    container:
+      image: ubuntu:20.04
+      options: --privileged
+
+    steps:
+      - name: 安装编译依赖
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y \
+            ca-certificates curl wget git pkg-config make ninja-build \
+            nasm yasm build-essential zip unzip xz-utils file \
+            libxmp-dev \
+            libdrm-dev libgbm-dev libegl1-mesa-dev libgles2-mesa-dev \
+            libasound2-dev libpulse-dev \
+            libx11-dev libxext-dev libxi-dev libxrandr-dev libxcursor-dev \
+            libwayland-dev libxkbcommon-dev
+
+          cd /tmp
+          wget -q https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-linux-aarch64.tar.gz
+          tar xzf cmake-3.31.6-linux-aarch64.tar.gz
+          cp -a cmake-3.31.6-linux-aarch64/bin/* /usr/local/bin/
+          cmake --version
+
+          echo "glibc: $(ldd --version | head -1)"
+
+      - name: 安装 Go 1.27.4 (arm64)
+        run: |
+          wget -q https://go.dev/dl/go1.27.4.linux-arm64.tar.gz -O /tmp/go.tgz
+          rm -rf /usr/local/go
+          tar -C /usr/local -xzf /tmp/go.tgz
+          /usr/local/go/bin/go version
+
+      - name: 获取 Ikemen GO 源码
+        run: |
+          git clone --depth 1 https://github.com/ikemen-engine/Ikemen-GO.git /tmp/ikemen
+          cd /tmp/ikemen
+          git log -1 --oneline
+
+      - name: 编译 ARM64 二进制
+        run: |
+          cd /tmp/ikemen
+          export PATH=/usr/local/go/bin:$PATH
+          rm -f build/glibc_compat.h
+          export BUILD_SDL2=yes
+          export BUILD_FFMPEG=yes
+          ./build/build.sh LinuxARM
+          file Ikemen_GO_LinuxARM 2>/dev/null || file bin/Ikemen_GO_LinuxARM
+
+      - name: 打包二进制和依赖库
+        run: |
+          cd /tmp/ikemen
+          mkdir -p /tmp/out/lib
+          cp Ikemen_GO_LinuxARM /tmp/out/ 2>/dev/null || cp bin/Ikemen_GO_LinuxARM /tmp/out/
+          cp -a lib/. /tmp/out/lib/ 2>/dev/null || true
+          echo "=== 二进制动态依赖 ==="
+          ldd /tmp/out/Ikemen_GO_LinuxARM || true
+          cd /tmp/out
+          zip -r /tmp/ikemen-arm64-r36s.zip .
+
+      - name: 上传成品
+        uses: actions/upload-artifact@v4
+        with:
+          name: ikemen-arm64-r36s
+          path: /tmp/ikemen-arm64-r36s.zip
+          if-no-files-found: error
