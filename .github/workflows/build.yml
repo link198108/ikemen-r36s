@@ -19,6 +19,8 @@ jobs:
             ca-certificates curl wget git pkg-config make ninja-build \
             nasm yasm build-essential zip unzip xz-utils file \
             libxmp-dev \
+            libavformat-dev libavcodec-dev libavutil-dev \
+            libswresample-dev libswscale-dev libavfilter-dev \
             libdrm-dev libgbm-dev libegl1-mesa-dev libgles2-mesa-dev \
             libasound2-dev libpulse-dev \
             libx11-dev libxext-dev libxi-dev libxrandr-dev libxcursor-dev \
@@ -29,8 +31,11 @@ jobs:
           tar xzf cmake-3.31.6-linux-aarch64.tar.gz
           cp -a cmake-3.31.6-linux-aarch64/bin/* /usr/local/bin/
           cmake --version
-
           echo "glibc: $(ldd --version | head -1)"
+          echo "gcc: $(gcc --version | head -1)"
+          echo '#include <stdlib.h>' > /tmp/t.c
+          echo 'int main(){return 0;}' >> /tmp/t.c
+          gcc /tmp/t.c -o /tmp/t && echo "C_COMPILE_OK" || echo "C_COMPILE_FAILED"
 
       - name: 安装 Go 1.27.4 (arm64)
         run: |
@@ -49,10 +54,19 @@ jobs:
         run: |
           cd /tmp/ikemen
           export PATH=/usr/local/go/bin:$PATH
+
+          unset CFLAGS CXXFLAGS CPPFLAGS CGO_CFLAGS CGO_CXXFLAGS CGO_LDFLAGS CPATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH LIBRARY_PATH CC CXX
+
           rm -f build/glibc_compat.h
+
+          echo "=== CGO env after cleanup ==="
+          env | grep -iE '^(CFLAGS|CXXFLAGS|CPPFLAGS|CGO_|CPATH|CC=|CXX=)' || echo "(clean)"
+
+          export BUILD_FFMPEG=no
           export BUILD_SDL2=yes
-          export BUILD_FFMPEG=yes
+
           ./build/build.sh LinuxARM
+
           file Ikemen_GO_LinuxARM 2>/dev/null || file bin/Ikemen_GO_LinuxARM
 
       - name: 打包二进制和依赖库
