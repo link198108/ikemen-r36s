@@ -9,6 +9,9 @@ jobs:
     container:
       image: ubuntu:20.04
       options: --privileged
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: 安装编译依赖
@@ -94,8 +97,11 @@ jobs:
           grep -n -- '--pkg-config-flags=--static' /tmp/ikemen/build/build.sh || echo "PATCH_MISSING"
 
           set +e
-          ./build/build.sh LinuxARM 2>&1 | tee /tmp/ikemen-build.log
-          rc=${PIPESTATUS[0]}
+          # 不用 PIPESTATUS（sh/dash 不支持，会 Bad substitution）：
+          # 先重定向到日志，用 $? 取退出码，再 cat 出来，任何 shell 都兼容。
+          ./build/build.sh LinuxARM > /tmp/ikemen-build.log 2>&1
+          rc=$?
+          cat /tmp/ikemen-build.log
           set -e
           echo "BUILD_RC=$rc"
 
