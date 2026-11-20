@@ -24,6 +24,7 @@ jobs:
             cmake libxmp-dev \
             libdrm-dev libgbm-dev libegl1-mesa-dev libgles2-mesa-dev \
             libasound2-dev \
+            libgtk-3-dev \
             libx11-dev libxext-dev libxi-dev libxrandr-dev libxcursor-dev \
             libwayland-dev libxkbcommon-dev
           echo "glibc: $(ldd --version | head -1)"
@@ -100,6 +101,65 @@ jobs:
           open(mp, 'w', encoding='utf-8', newline='\n').write(s)
           print('PATCH_OK: SDL2 KMSDRM enabled, X11/OpenGL disabled')
 
+          # ===== 补丁 2b：重写 util_desktop.go 的 selectRenderer =====
+          # 工厂函数引用 Renderer_GL33/VK/DX 构造器；我们要排除那些渲染器文件，
+          # 所以必须先把工厂改成只构造 Renderer_SW，否则 undefined symbol。
+          up = 'src/util_desktop.go'
+          need(os.path.exists(up), 'util_desktop.go not found')
+          u = open(up, encoding='utf-8', newline='').read()
+          import re as _re
+          m = _re.search(r'func selectRenderer\(cfgVal string\) \(Renderer, FontRenderer\) \{.*?\n\}', u, _re.S)
+          need(m is not None, 'selectRenderer body not found in util_desktop.go')
+          new_fn = ('func selectRenderer(cfgVal string) (Renderer, FontRenderer) {\n'
+                    '\tvar gfx Renderer\n'
+                    '\tvar gfxFont FontRenderer\n'
+                    '\t_ = cfgVal\n'
+                    '\tgfx = &Renderer_SW{}\n'
+                    '\tgfxFont = &FontRenderer_SW{}\n'
+                    '\treturn gfx, gfxFont\n'
+                    '}')
+          u = u[:m.start()] + new_fn + u[m.end():]
+          open(up, 'w', encoding='utf-8', newline='\n').write(u)
+          print('PATCH_OK: selectRenderer rewritten to Renderer_SW only')
+
+          # ===== 补丁 2c：排除其他所有渲染器文件 =====
+          # gl33/gles32/vk/dx 与 sw 可能含同名包级符号（helper/变量），同时编译会
+          # redeclare。2b 已消除外部引用，现在可以安全排除。
+          excluded = ['render_gles32.go','font_gles32.go','render_gl33.go','font_gl33.go',
+                      'render_vk.go','font_vk.go','render_dx.go','render_dx_font.go',
+                      'util_armdevice.go','util_android.go','util_darwin.go','util_windows.go']
+          for fn in excluded:
+              fp = 'src/' + fn
+              if not os.path.exists(fp):
+                  continue
+              body = open(fp, encoding='utf-8', newline='').read()
+              if body.startswith('//go:build'):
+                  nl = body.find('\n')
+                  body = '//go:build ignore\n' + body[nl+1:]
+              else:
+                  body = '//go:build ignore\n\n' + body
+              open(fp, 'w', encoding='utf-8', newline='\n').write(body)
+              print('EXCLUDED:', fn)
+          print('PATCH_OK: non-SW renderers excluded')
+
+          # ===== 补丁 2d：确认没有残留对被排除类型的引用 =====
+          bad = []
+          for g in _glob.glob('src/*.go'):
+              if _glob.fnmatch.fnmatch(g, 'src/render_sw*.go') or g.endswith(('util_desktop.go','main.go')):
+                  pass
+              b = open(g, encoding='utf-8', errors='replace').read()
+              if b.startswith('//go:build ignore'):
+                  continue
+              for sym in ('Renderer_GL33','Renderer_GLES32','Renderer_VK','Renderer_DX',
+                          'FontRenderer_GL33','FontRenderer_GLES32','FontRenderer_VK','FontRenderer_DX'):
+                  if sym in b:
+                      bad.append((g, sym))
+          if bad:
+              for g, sym in bad:
+                  print('STILL_REFERENCED:', g, sym)
+              sys.exit('PATCH_FAILED: dangling renderer references')
+          print('PATCH_OK: no dangling references')
+
           # ===== 补丁 3：render_sw.go 强制软件渲染，不尝试加速 =====
           # 原代码先试 SDL_RENDERER_ACCELERATED，在 Mali 上可能"创建成功但黑屏"，
           # 那样就不会回退软件。强制 flags=0 (SDL_RENDERER_SOFTWARE) 保证纯 CPU。
@@ -107,7 +167,9 @@ jobs:
           t = open(rp, encoding='utf-8', newline='').read()
           old_acc = 'r.renderer, err = sdl.CreateRenderer(sys.window.Window, -1, sdl.RENDERER_ACCELERATED)'
           need(t.count(old_acc) == 1, 'renderer accelerated anchor count=%d' % t.count(old_acc))
-          t = t.replace(old_acc, 'r.renderer, err = sdl.CreateRenderer(sys.window.Window, -1, 0) // FORCE SOFTWARE (R36S Mali workaround)', 1)
+          # SDL_RENDERER_SOFTWARE = 0x00000001. Use explicit numeric value so we
+          # don't depend on the Go binding constant name; forces pure CPU path.
+          t = t.replace(old_acc, 'r.renderer, err = sdl.CreateRenderer(sys.window.Window, -1, sdl.RendererFlags(1)) // FORCE SOFTWARE', 1)
           open(rp, 'w', encoding='utf-8', newline='\n').write(t)
           print('PATCH_OK: forced SDL_RENDERER_SOFTWARE')
 
