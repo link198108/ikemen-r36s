@@ -118,8 +118,30 @@ jobs:
                     '\treturn gfx, gfxFont\n'
                     '}')
           u = u[:m.start()] + new_fn + u[m.end():]
+
+          # 补 2b-2：gl33/gles32 被排除后，render.go:427 引用的
+          # flushSpriteQueueBatched 没了定义。补一个分发到软件光栅器的版本
+          #（与 render_gl33.go 原实现一致，只是删掉了对已排除类型的分支）。
+          stub = ('\n'
+                  '// flushSpriteQueueBatched routes the deferred sprite queue to the\n'
+                  '// software rasterizer (GL33/GLES32 backends are excluded from this build).\n'
+                  'func flushSpriteQueueBatched(queue []SpriteDrawCall) {\n'
+                  '\tif r, ok := gfx.(*Renderer_SW); ok {\n'
+                  '\t\tr.flushSWQueue(queue)\n'
+                  '\t\treturn\n'
+                  '\t}\n'
+                  '\tfor i := range queue {\n'
+                  '\t\tif queue[i].isFlat {\n'
+                  '\t\t\trenderFlatCallImmediate(&queue[i])\n'
+                  '\t\t} else {\n'
+                  '\t\t\trenderSpriteImmediate(queue[i].rp)\n'
+                  '\t\t}\n'
+                  '\t}\n'
+                  '\tdrawCallStats.TotalBatches += len(queue)\n'
+                  '}\n')
+          u = u + stub
           open(up, 'w', encoding='utf-8', newline='\n').write(u)
-          print('PATCH_OK: selectRenderer rewritten to Renderer_SW only')
+          print('PATCH_OK: selectRenderer rewritten + flushSpriteQueueBatched added')
 
           # ===== 补丁 2c：排除其他所有渲染器文件 =====
           # gl33/gles32/vk/dx 与 sw 可能含同名包级符号（helper/变量），同时编译会
