@@ -132,11 +132,11 @@ jobs:
               if not os.path.exists(fp):
                   continue
               body = open(fp, encoding='utf-8', newline='').read()
-              if body.startswith('//go:build'):
-                  nl = body.find('\n')
-                  body = '//go:build ignore\n' + body[nl+1:]
-              else:
-                  body = '//go:build ignore\n\n' + body
+              # 剔除所有旧 build 标记（有些文件带版权头，标记不在首行；
+              # 盲注入会造成 multiple //go:build comments 编译错误）
+              lines = [ln for ln in body.split('\n')
+                       if not ln.startswith('//go:build') and not ln.startswith('// +build')]
+              body = '//go:build ignore\n\n' + '\n'.join(lines)
               open(fp, 'w', encoding='utf-8', newline='\n').write(body)
               print('EXCLUDED:', fn)
           print('PATCH_OK: non-SW renderers excluded')
