@@ -143,6 +143,79 @@ jobs:
           open(up, 'w', encoding='utf-8', newline='\n').write(u)
           print('PATCH_OK: selectRenderer rewritten + flushSpriteQueueBatched added')
 
+          # ===== 补丁 2e：错误弹窗改为 stderr 输出 =====
+          # sqweek/dialog 依赖 GTK/X server。R36S(ArkOS) 无 X server，
+          # ShowErrorDialog 会因 GTK 初始化失败而二次 panic，
+          # 掩盖真实错误并阻止启动。改为打印到 stderr（启动脚本已重定向进日志）。
+          up2 = 'src/util_desktop.go'
+          u = open(up2, encoding='utf-8', newline='').read()
+          need('\t"github.com/sqweek/dialog"\n' in u, 'sqweek import anchor')
+          u = u.replace('\t"github.com/sqweek/dialog"\n', '')
+          u = u.replace('\t"fmt"\n', '\t"fmt"\n\t"os"\n', 1)
+          old_dlg = ('// Message box implementation\n'
+                     'func ShowInfoDialog(message, title string) {\n'
+                     '\tdialog.Message(message).Title(title).Info()\n'
+                     '}\n'
+                     '\n'
+                     'func ShowErrorDialog(message string) {\n'
+                     '\tdialog.Message(message).Title("I.K.E.M.E.N Error").Error()\n'
+                     '}')
+          need(u.count(old_dlg) == 1, 'dialog funcs anchor count=%d' % u.count(old_dlg))
+          new_dlg = ('// Message box implementation\n'
+                     '// Headless/embedded systems have no X server; sqweek/dialog (GTK) would\n'
+                     '// panic there and swallow the real error. Print to stderr instead —\n'
+                     '// the launch script captures stderr into the port log.\n'
+                     'func ShowInfoDialog(message, title string) {\n'
+                     '\tfmt.Fprintf(os.Stderr, "[Ikemen Info] %s: %s\\n", title, message)\n'
+                     '}\n'
+                     '\n'
+                     'func ShowErrorDialog(message string) {\n'
+                     '\tfmt.Fprintf(os.Stderr, "[Ikemen Error] %s\\n", message)\n'
+                     '}')
+          u = u.replace(old_dlg, new_dlg, 1)
+          open(up2, 'w', encoding='utf-8', newline='\n').write(u)
+          print('PATCH_OK: error dialogs print to stderr (no GTK)')
+
+          # ===== 补丁 2f：newWindow 在 KMSDRM 下的容错 =====
+          # 1) GetDesktopDisplayMode 在 KMSDRM 上可能失败，原代码直接 return error
+          #    —— 这是真机日志中 system.go:396 chk 失败的最可能来源。降级为用配置尺寸。
+          # 2) 窗口化 CreateWindow 在 KMSDRM 上可能被拒绝，失败时改用全屏桌面重试。
+          sp = 'src/system_sdl.go'
+          s = open(sp, encoding='utf-8', newline='').read()
+          old_mode = ('			mode, err := sdl.GetDesktopDisplayMode(0)\n'
+                      '			if err != nil {\n'
+                      '				return nil, fmt.Errorf("failed to obtain primary monitor")\n'
+                      '			}\n'
+                      '			desktopW, desktopH = mode.W, mode.H')
+          need(s.count(old_mode) == 1, 'desktop mode anchor count=%d' % s.count(old_mode))
+          new_mode = ('			mode, merr := sdl.GetDesktopDisplayMode(0)\n'
+                      '			if merr != nil || mode == nil || mode.W <= 0 {\n'
+                      '				fmt.Printf("WARN: GetDesktopDisplayMode failed (%v), falling back to config size\\n", merr)\n'
+                      '				desktopW, desktopH = w2, h2\n'
+                      '			} else {\n'
+                      '				desktopW, desktopH = mode.W, mode.H\n'
+                      '			}')
+          s = s.replace(old_mode, new_mode, 1)
+          old_cw = ('		window, err = sdl.CreateWindow(s.cfg.Config.WindowTitle, posX, posY, w2, h2, windowFlags)\n'
+                    '		if err != nil {\n'
+                    '			return nil, fmt.Errorf("failed to create window: %w", err)\n'
+                    '		}')
+          need(s.count(old_cw) == 1, 'createwindow anchor count=%d' % s.count(old_cw))
+          new_cw = ('		window, err = sdl.CreateWindow(s.cfg.Config.WindowTitle, posX, posY, w2, h2, windowFlags)\n'
+                    '		if err != nil {\n'
+                    '			// KMSDRM and other headless backends often reject windowed windows;\n'
+                    '			// retry as fullscreen desktop, the most permissive mode.\n'
+                    '			fmt.Printf("WARN: windowed CreateWindow failed (%v), retrying fullscreen-desktop\\n", err)\n'
+                    '			window, err = sdl.CreateWindow(s.cfg.Config.WindowTitle, 0, 0, desktopW, desktopH,\n'
+                    '				sdl.WINDOW_FULLSCREEN_DESKTOP|sdl.WINDOW_SHOWN|sdl.WINDOW_INPUT_FOCUS)\n'
+                    '			if err != nil {\n'
+                    '				return nil, fmt.Errorf("failed to create window: %w", err)\n'
+                    '			}\n'
+                    '		}')
+          s = s.replace(old_cw, new_cw, 1)
+          open(sp, 'w', encoding='utf-8', newline='\n').write(s)
+          print('PATCH_OK: newWindow KMSDRM fallbacks added')
+
           # ===== 补丁 2c：排除其他所有渲染器文件 =====
           # gl33/gles32/vk/dx 与 sw 可能含同名包级符号（helper/变量），同时编译会
           # redeclare。2b 已消除外部引用，现在可以安全排除。
