@@ -1,0 +1,203 @@
+name: Build Ikemen GO (SDL2 Software Renderer) for R36S
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    container:
+      image: ubuntu:20.04
+      options: --privileged
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: 安装编译依赖
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y \
+            ca-certificates curl wget git pkg-config make ninja-build \
+            nasm yasm build-essential zip unzip xz-utils file python3 \
+            cmake libxmp-dev \
+            libdrm-dev libgbm-dev libegl1-mesa-dev libgles2-mesa-dev \
+            libasound2-dev \
+            libx11-dev libxext-dev libxi-dev libxrandr-dev libxcursor-dev \
+            libwayland-dev libxkbcommon-dev
+          echo "glibc: $(ldd --version | head -1)"
+          echo "gcc:   $(gcc --version | head -1)"
+          echo "nasm:  $(nasm -v)"
+
+      - name: 安装 Go
+        run: |
+          wget -q https://go.dev/dl/go1.24.5.linux-arm64.tar.gz -O /tmp/go.tgz
+          rm -rf /usr/local/go
+          tar -C /usr/local -xzf /tmp/go.tgz
+          /usr/local/go/bin/go version
+
+      - name: 获取 Ikemen GO 源码 (sdl2_renderer 分支)
+        run: |
+          git clone --depth 1 --branch sdl2_renderer https://github.com/leonkasovan/Ikemen-GO.git /tmp/ikemen
+          cd /tmp/ikemen
+          git log -1 --oneline
+          echo "=== 软件渲染文件确认 ==="
+          ls -l src/render_sw*.go
+
+      - name: 打补丁 (启用纯 CPU 软件渲染 + KMSDRM)
+        run: |
+          cd /tmp/ikemen
+          export PATH=/usr/local/go/bin:$PATH
+
+          python3 - <<'PY'
+          import sys, os
+
+          def need(cond, msg):
+              if not cond:
+                  sys.exit('PATCH_FAILED: ' + msg)
+
+          # ===== 补丁 1：Makefile 删除 armdevice 标签 =====
+          # sdl2_renderer 的软件渲染器 tag 是 !android && !armdevice。
+          # Makefile 在 arm64+linux 时自动加 armdevice，会排除软件渲染器。
+          # 必须去掉，否则 Renderer_SW 不会被编译进去。
+          mp = 'Makefile'
+          s = open(mp, encoding='utf-8', newline='').read()
+          old = ('  ifeq ($(HOST_ARCH),arm64)\n'
+                 '    ifeq ($(HOST_OS),linux)\n'
+                 '      GO_TAGS += armdevice\n'
+                 '    endif\n'
+                 '  endif\n')
+          need(s.count(old) == 1, 'armdevice block anchor count=%d' % s.count(old))
+          s = s.replace(old, '', 1)
+          open(mp, 'w', encoding='utf-8', newline='\n').write(s)
+          print('PATCH_OK: removed armdevice tag')
+
+          # ===== 补丁 2：Makefile SDL2 linux flags 启用 KMSDRM =====
+          # R36S 无 X server / Wayland，需 KMSDRM 直连 framebuffer 建窗口。
+          # 软件渲染器仍需要 SDL_Window 来 present（不走 GL）。
+          s = open(mp, encoding='utf-8', newline='').read()
+          old_sdl = ('else ifeq ($(HOST_OS),linux)\n'
+                     '  SDL2_CMAKE_FLAGS += \\\n'
+                     '\t-DSDL_OPENGL=ON \\\n'
+                     '\t-DSDL_OPENGLES=OFF \\\n'
+                     '\t-DSDL_X11=ON \\\n'
+                     '\t-DSDL_WAYLAND=OFF \\\n'
+                     '\t-DSDL_COCOA=OFF \\\n'
+                     '\t-DSDL_VULKAN=OFF\n')
+          new_sdl = ('else ifeq ($(HOST_OS),linux)\n'
+                     '  SDL2_CMAKE_FLAGS += \\\n'
+                     '\t-DSDL_OPENGL=OFF \\\n'
+                     '\t-DSDL_OPENGLES=OFF \\\n'
+                     '\t-DSDL_X11=OFF \\\n'
+                     '\t-DSDL_WAYLAND=OFF \\\n'
+                     '\t-DSDL_KMSDRM=ON \\\n'
+                     '\t-DSDL_GBM=ON \\\n'
+                     '\t-DSDL_COCOA=OFF \\\n'
+                     '\t-DSDL_VULKAN=OFF\n')
+          need(s.count(old_sdl) == 1, 'sdl2 linux flags anchor count=%d' % s.count(old_sdl))
+          s = s.replace(old_sdl, new_sdl, 1)
+          open(mp, 'w', encoding='utf-8', newline='\n').write(s)
+          print('PATCH_OK: SDL2 KMSDRM enabled, X11/OpenGL disabled')
+
+          # ===== 补丁 3：render_sw.go 强制软件渲染，不尝试加速 =====
+          # 原代码先试 SDL_RENDERER_ACCELERATED，在 Mali 上可能"创建成功但黑屏"，
+          # 那样就不会回退软件。强制 flags=0 (SDL_RENDERER_SOFTWARE) 保证纯 CPU。
+          rp = 'src/render_sw.go'
+          t = open(rp, encoding='utf-8', newline='').read()
+          old_acc = 'r.renderer, err = sdl.CreateRenderer(sys.window.Window, -1, sdl.RENDERER_ACCELERATED)'
+          need(t.count(old_acc) == 1, 'renderer accelerated anchor count=%d' % t.count(old_acc))
+          t = t.replace(old_acc, 'r.renderer, err = sdl.CreateRenderer(sys.window.Window, -1, 0) // FORCE SOFTWARE (R36S Mali workaround)', 1)
+          open(rp, 'w', encoding='utf-8', newline='\n').write(t)
+          print('PATCH_OK: forced SDL_RENDERER_SOFTWARE')
+
+          # ===== 补丁 4：config.ini RenderMode = SDL2 Software =====
+          cp = 'save/config.ini'
+          if os.path.exists(cp):
+              import re
+              c = open(cp, encoding='utf-8', errors='replace').read()
+              c = re.sub(r'^(RenderMode\s*=\s*).*$', r'\1SDL2 Software', c, flags=re.M)
+              open(cp, 'w', encoding='utf-8', newline='\n').write(c)
+              print('PATCH_OK: config RenderMode=SDL2 Software')
+          else:
+              print('WARN: save/config.ini not found (engine will generate defaults)')
+          PY
+
+          echo "=== 补丁确认 ==="
+          grep -n "armdevice" Makefile || echo "armdevice removed OK"
+          grep -n "SDL_KMSDRM" Makefile || echo "KMSDRM MISSING!"
+          grep -n "FORCE SOFTWARE" src/render_sw.go || echo "FORCE SOFTWARE MISSING!"
+          grep -n "SDL2 Software" save/config.ini 2>/dev/null || echo "(config will be generated)"
+
+      - name: 编译 (make, ARM64 native)
+        run: |
+          cd /tmp/ikemen
+          export PATH=/usr/local/go/bin:$PATH
+          unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS CPATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH LIBRARY_PATH
+          unset CGO_CFLAGS CGO_CXXFLAGS CGO_CPPFLAGS CGO_LDFLAGS CC CXX
+
+          set +e
+          make > /tmp/ikemen-build.log 2>&1
+          rc=$?
+          cat /tmp/ikemen-build.log
+          set -e
+          echo "BUILD_RC=$rc"
+
+          {
+            echo "## 编译结果：退出码 $rc"
+            echo ""
+            echo "### 日志最后 80 行"
+            echo '```'
+            tail -80 /tmp/ikemen-build.log
+            echo '```'
+            if [ "$rc" -ne 0 ]; then
+              echo "### FFmpeg config.log 错误"
+              echo '```'
+              find build -path '*FFmpeg*/ffbuild/config.log' -exec grep -iE 'ERROR|libvpx|vpx' {} \; 2>/dev/null | tail -30 || echo "(无)"
+              echo '```'
+              echo "### SDL2 CMakeCache 视频后端"
+              echo '```'
+              find build -path '*SDL*/CMakeCache.txt' -exec grep -iE 'SDL_(KMSDRM|GBM|X11|WAYLAND|OPENGL|VIDEO)' {} \; 2>/dev/null | tail -40 || echo "(无)"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          exit $rc
+
+      - name: 上传编译日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sw-build-log
+          path: /tmp/ikemen-build.log
+          if-no-files-found: warn
+
+      - name: 打包二进制和依赖库
+        if: success()
+        run: |
+          cd /tmp/ikemen
+          mkdir -p /tmp/out/lib
+          # 找二进制
+          BIN=$(find . -maxdepth 3 -type f -name 'Ikemen_GO.arm64' | head -1)
+          echo "BIN=$BIN"
+          test -n "$BIN" || { echo "二进制未找到"; find . -maxdepth 3 -type f -name 'Ikemen_GO*' ; exit 1; }
+          cp "$BIN" /tmp/out/ikemen_linux.aarch64
+          chmod +x /tmp/out/ikemen_linux.aarch64
+          # 复制自编译的 SDL2/FFmpeg/xmp 动态库（如果有）
+          find build -type f -name '*.so*' -path '*output/lib*' -exec cp -a {} /tmp/out/lib/ \; 2>/dev/null || true
+          echo "=== 二进制 ==="
+          ls -l /tmp/out/ikemen_linux.aarch64
+          echo "=== 动态依赖 ==="
+          ldd /tmp/out/ikemen_linux.aarch64 || true
+          echo "=== 确认软件渲染器已编译进去 ==="
+          strings /tmp/out/ikemen_linux.aarch64 | grep -iE "SDL2 Software|Renderer_SW|FORCE SOFTWARE" | head -10 || echo "WARN: 未找到软件渲染标识"
+          cd /tmp/out
+          zip -r /tmp/ikemen-software-r36s.zip .
+
+      - name: 上传成品
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ikemen-software-r36s
+          path: /tmp/ikemen-software-r36s.zip
+          if-no-files-found: error
