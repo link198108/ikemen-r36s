@@ -189,7 +189,7 @@ jobs:
                       '			desktopW, desktopH = mode.W, mode.H')
           need(s.count(old_mode) == 1, 'desktop mode anchor count=%d' % s.count(old_mode))
           new_mode = ('			mode, merr := sdl.GetDesktopDisplayMode(0)\n'
-                      '			if merr != nil || mode == nil || mode.W <= 0 {\n'
+                      '			if merr != nil || mode.W <= 0 {\n'
                       '				fmt.Printf("WARN: GetDesktopDisplayMode failed (%v), falling back to config size\\n", merr)\n'
                       '				desktopW, desktopH = w2, h2\n'
                       '			} else {\n'
