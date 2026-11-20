@@ -102,8 +102,7 @@ jobs:
           print('PATCH_OK: SDL2 KMSDRM enabled, X11/OpenGL disabled')
 
           # ===== 补丁 2b：重写 util_desktop.go 的 selectRenderer =====
-          # 工厂函数引用 Renderer_GL33/VK/DX 构造器；我们要排除那些渲染器文件，
-          # 所以必须先把工厂改成只构造 Renderer_SW，否则 undefined symbol。
+          import glob as _glob
           up = 'src/util_desktop.go'
           need(os.path.exists(up), 'util_desktop.go not found')
           u = open(up, encoding='utf-8', newline='').read()
